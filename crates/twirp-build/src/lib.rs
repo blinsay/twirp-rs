@@ -12,13 +12,40 @@ pub fn service_generator() -> Box<ServiceGenerator> {
     Box::new(ServiceGenerator {})
 }
 
-pub struct ServiceGenerator;
-
-fn as_path(s: &str) -> TokenStream {
-    syn::parse_str::<syn::Path>(s)
-        .expect("twirp-build generated invalid Rust. this is a bug in twirp-build, please file an issue")
-        .to_token_stream()
+struct MethodTypes {
+    input_type: TokenStream,
+    output_type: TokenStream,
 }
+
+impl MethodTypes {
+    fn from_prost(m: &prost_build::Method) -> Self {
+        let as_type = |s| -> TokenStream {
+            let Ok(typ) = syn::parse_str::<syn::Type>(s) else {
+                panic!(
+                    "twirp-build generated invalid Rust. this is a bug in twirp-build, please file an issue:\n
+                      method={name}
+                      input_type={input_type}
+                      output_type={output_type}
+                    ",
+                    name = m.name,
+                    input_type = m.input_type,
+                    output_type = m.output_type,
+                );
+            };
+            typ.to_token_stream()
+        };
+
+        let input_type = as_type(&m.input_type);
+        let output_type = as_type(&m.output_type);
+
+        Self {
+            input_type,
+            output_type,
+        }
+    }
+}
+
+pub struct ServiceGenerator;
 
 impl prost_build::ServiceGenerator for ServiceGenerator {
     fn generate(&mut self, service: prost_build::Service, buf: &mut String) {
@@ -30,8 +57,10 @@ impl prost_build::ServiceGenerator for ServiceGenerator {
         let mut proxy_methods = Vec::with_capacity(service.methods.len());
         for m in &service.methods {
             let name = format_ident!("{}", &m.name);
-            let input_type = as_path(&m.input_type);
-            let output_type = as_path(&m.output_type);
+            let MethodTypes {
+                input_type,
+                output_type,
+            } = MethodTypes::from_prost(m);
 
             trait_methods.push(quote! {
                 async fn #name(&self, ctx: twirp::Context, req: #input_type) -> Result<#output_type, Self::Error>;
@@ -68,9 +97,9 @@ impl prost_build::ServiceGenerator for ServiceGenerator {
         for m in &service.methods {
             let name = format_ident!("{}", &m.name);
             let uri = format!("/{}", &m.proto_name);
-            let req_type = as_path(&m.input_type);
+            let MethodTypes { input_type, .. } = MethodTypes::from_prost(&m);
             route_calls.push(quote! {
-                .route(#uri, |api: T, ctx: twirp::Context, req: #req_type| async move {
+                .route(#uri, |api: T, ctx: twirp::Context, req: #input_type| async move {
                     api.#name(ctx, req).await
                 })
             });
@@ -96,8 +125,10 @@ impl prost_build::ServiceGenerator for ServiceGenerator {
         let mut client_methods = Vec::with_capacity(service.methods.len());
         for m in &service.methods {
             let name = format_ident!("{}", &m.name);
-            let input_type = as_path(&m.input_type);
-            let output_type = as_path(&m.output_type);
+            let MethodTypes {
+                input_type,
+                output_type,
+            } = MethodTypes::from_prost(&m);
 
             client_trait_methods.push(quote! {
                 async fn #name(&self, req: #input_type) -> Result<#output_type, twirp::ClientError>;
@@ -137,7 +168,8 @@ impl prost_build::ServiceGenerator for ServiceGenerator {
             #client_trait
         };
 
-        let ast: syn::File = syn::parse2(generated).expect("generated an invalid token stream");
+        let ast: syn::File = syn::parse2(generated)
+            .expect("twirp-build generated invalid Rust. this is a bug in twirp-build, please file an issue");
         let code = prettyplease::unparse(&ast);
         buf.push_str(&code);
     }
